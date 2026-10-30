@@ -102,7 +102,7 @@
         <span class="muted">{status.busy_with}</span>
       {/if}
       <span class="muted gpu">
-        Blender {status.version} · {status.devices.join(", ") || "CPU"}
+        Blender {status.version} · Cycles {status.devices.join(", ") || "CPU"}
         {#if status.device_type}({status.device_type}){/if}
       </span>
     {:else}

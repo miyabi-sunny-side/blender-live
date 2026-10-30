@@ -117,7 +117,7 @@ describe("Home", () => {
     await waitFor(() => expect(screen.getByText("待機中")).toBeTruthy());
     expect(screen.getByText("scenes/cube.blend")).toBeTruthy();
     expect(screen.getByText("未保存")).toBeTruthy();
-    expect(screen.getByText(/RTX 5060 Ti/)).toBeTruthy();
+    expect(screen.getByText(/Cycles NVIDIA GeForce RTX 5060 Ti/)).toBeTruthy();
   });
 
   it("explains a crash that lost the unsaved scene", async () => {

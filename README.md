@@ -101,7 +101,8 @@ url = "http://<host>:5014/mcp"
 Cycles uses OptiX on every GPU listed in `BLENDER_GPUS`, numbered as `nvidia-smi` numbers them.
 The default `0,1` renders on both cards of a two-GPU machine. Use one index to keep the other card
 free for other work, or `all` to leave the choice to the driver. EEVEE renders on the GPU that
-EGL picks and is not affected by this setting.
+EGL picks and is not affected by this setting. Blender starts without `DISPLAY` and
+`WAYLAND_DISPLAY`, so EEVEE stays on a render GPU even when an integrated GPU drives the screen.
 
 `status` and `scene_summary` show the devices Blender actually enabled.
 

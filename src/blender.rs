@@ -331,6 +331,10 @@ impl Blender {
             .arg("--socket")
             .arg(&socket)
             .current_dir(self.cfg.camp.root())
+            // Without a display EEVEE draws through headless EGL on a render GPU. An inherited
+            // DISPLAY would put it on whatever GPU drives the screen, often an integrated one.
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
