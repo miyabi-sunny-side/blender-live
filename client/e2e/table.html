@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>一覧スタイルの検証</title>
+    <script type="module">
+      import "normalize.css";
+      import "../src/global.sass";
+      const body = document.querySelector("tbody");
+      for (let i = 1; i <= 100; i++) {
+        const row = body.insertRow();
+        row.insertCell().textContent = `作品 ${i}`;
+        row.insertCell().textContent = "2026-09-11";
+      }
+    </script>
+  </head>
+  <body>
+    <main class="content content-wide">
+      <div
+        class="table-scroll"
+        tabindex="0"
+        role="region"
+        aria-label="作品一覧"
+      >
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">名前</th>
+              <th scope="col">更新日</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </main>
+  </body>
+</html>
