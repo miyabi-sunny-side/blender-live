@@ -12,15 +12,15 @@
   --c-muted: #6f6257
   --c-border: #e3d9c9
   --c-scrim: rgba(58, 47, 40, 0.4)
-  --c-accent: #9a6a00
-  --c-accent-subtle: rgba(154, 106, 0, 0.1)
+  --c-accent: #a84d00
+  --c-accent-subtle: rgba(168, 77, 0, 0.1)
   --c-link: #14506e
   --c-danger: #9c2b1d
   --c-danger-subtle: #f9e9e4
   --c-wash-base: #f6efe0
   --c-wash-raised: #faf4ea
-  --c-hover-1: rgba(154, 106, 0, 0.1)
-  --c-hover-2: rgba(154, 106, 0, 0.16)
+  --c-hover-1: rgba(168, 77, 0, 0.1)
+  --c-hover-2: rgba(168, 77, 0, 0.16)
 
 :root
   color-scheme: dark
@@ -46,8 +46,8 @@
   --c-muted: #9a9a9a
   --c-border: #333333
   --c-scrim: rgba(0, 0, 0, 0.6)
-  --c-accent: #e0a800
-  --c-accent-subtle: rgba(224, 168, 0, 0.15)
+  --c-accent: #f5933a
+  --c-accent-subtle: rgba(245, 147, 58, 0.15)
   --c-link: #7fdbff
   --c-danger: #ff6b6b
   --c-danger-subtle: #3a1a1a
@@ -95,28 +95,8 @@ a
   .content
     padding: var(--sp-5) var(--sp-3)
 
-// Dense lists keep document scrolling; only their horizontal overflow is local.
 .content-wide
-  max-width: none
-
-.table-scroll
-  overflow-x: auto
-
-  table
-    width: 100%
-    min-width: 640px
-    border-collapse: collapse
-    font-size: var(--fs-sm)
-    line-height: 24px
-
-  th, td
-    padding: var(--sp-1) var(--sp-2)
-    border-bottom: 1px solid var(--c-border)
-    text-align: left
-
-  th
-    color: var(--c-muted)
-    font-weight: 500
+  max-width: 1200px
 
 .btn
   padding: var(--sp-2) 14px

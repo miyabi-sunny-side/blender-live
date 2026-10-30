@@ -1,86 +1,88 @@
-name: Release container
+name: release
 
+# tag を契機に Linux x86_64 の binary を公開する。format・lint・test は手元の検証が持つ。
 on:
-  # Manual runs must select a v-prefixed tag ref.
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
-  # To enable automatic releases, uncomment the next two lines.
-  # push:
-  #   tags: ['v*.*.*']
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  publish:
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      # `contents: write` is what `gh release create` needs; the image push
-      # still only needs `packages: write`.
-      contents: write
-      packages: write
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      ARTIFACT: blender-live-linux-x86_64.tar.gz
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Verify tag matches Cargo version
-        shell: bash
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          set -euo pipefail
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           test "v$version" = "$GITHUB_REF_NAME"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Derive image metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=latest
-
-      - name: Build and publish image from the tagged source
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:build-cache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:build-cache,mode=max
-
-      # The GitHub Release is part of the release, not an extra: every product
-      # cut from this template publishes one for every tag, so a listener can
-      # act on the release notification. A tag that already has a Release
-      # (a re-run of this workflow) is left as it is rather than failed.
-      - name: Resolve the published image digest
-        id: digest
+      # The binary embeds the compiled UI (build.rs requires client/dist).
+      - name: Build the UI
         run: |
-          digest=$(docker buildx imagetools inspect \
-            "ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME#v}" \
-            --format '{{ json .Manifest.Digest }}' | tr -d '"')
-          echo "image=ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME#v}@${digest}" >> "$GITHUB_OUTPUT"
+          npm --prefix client ci
+          npm --prefix client run build
 
-      - name: Create the GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build release binary
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Package artifact
         run: |
-          set -euo pipefail
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; leaving it as it is"
-            exit 0
-          fi
-          gh release create "$GITHUB_REF_NAME" \
-            --verify-tag \
-            --generate-notes \
-            --notes "Image: \`${{ steps.digest.outputs.image }}\`"
+          cp "target/$TARGET/release/blender-live" blender-live
+          tar -czf "$ARTIFACT" blender-live LICENSE
+          sha256sum "$ARTIFACT" > "$ARTIFACT.sha256"
+
+      # 梱包の書き忘れを同じ job で落とす: archive の内容と、取り出した
+      # binary が名乗る version を tag の版と突き合わせる。
+      - name: Verify archive contents
+        run: |
+          tar -tzf "$ARTIFACT" | sort > archive-contents
+          printf '%s\n' LICENSE blender-live | sort | diff - archive-contents
+          check_dir="$(mktemp -d)"
+          tar -xzf "$ARTIFACT" -C "$check_dir"
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          test "$("$check_dir/blender-live" --version)" = "blender-live $version"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: |
+            ${{ env.ARTIFACT }}
+            ${{ env.ARTIFACT }}.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*

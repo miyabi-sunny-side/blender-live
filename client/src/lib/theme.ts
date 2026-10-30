@@ -1,7 +1,7 @@
 export type ThemeChoice = "dark" | "light" | "system";
 
 // Derived projects rename this key to `<project>:theme` (DESIGN.md).
-export const THEME_STORAGE_KEY = "rust-svelte-template:theme";
+export const THEME_STORAGE_KEY = "blender-live:theme";
 
 export function loadTheme(): ThemeChoice {
   try {

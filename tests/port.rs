@@ -16,8 +16,15 @@ impl Drop for Server {
 }
 
 fn command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rust-svelte-template"));
-    command.env_remove("PORT").env("LOG_LEVEL", "off");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_blender-live"));
+    command
+        .arg(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("port-camp"))
+        .env_remove("PORT")
+        .env("LOG_LEVEL", "off")
+        .env(
+            "BLENDER_BIN",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_blender.py"),
+        );
     command
 }
 

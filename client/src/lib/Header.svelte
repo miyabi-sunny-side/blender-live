@@ -32,7 +32,7 @@
 <svelte:window {onkeydown} />
 
 <header>
-  <a class="title" href="/">rust-svelte-template</a>
+  <a class="title" href="/">blender-live</a>
   <div class="menu-wrapper">
     <button
       class="icon-btn"

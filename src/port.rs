@@ -12,7 +12,7 @@ pub fn from_env() -> Result<u16, &'static str> {
 
 fn parse(value: Option<&str>) -> Result<u16, &'static str> {
     let Some(value) = value else {
-        return Ok(3000);
+        return Ok(5014);
     };
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(INVALID_PORT);
@@ -29,8 +29,8 @@ mod tests {
     use super::parse;
 
     #[test]
-    fn absent_port_defaults_to_3000() {
-        assert_eq!(parse(None), Ok(3000));
+    fn absent_port_defaults_to_5014() {
+        assert_eq!(parse(None), Ok(5014));
     }
 
     #[test]

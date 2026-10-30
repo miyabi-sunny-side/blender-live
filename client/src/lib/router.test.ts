@@ -9,10 +9,10 @@ describe("matchRoute", () => {
     expect(matchRoute("/")).toEqual({ index: 0, params: {} });
   });
 
-  it("maps /items/:id to the detail route with its id", () => {
-    expect(matchRoute("/items/sumi")).toEqual({
+  it("maps /view/* to the viewer with the decoded base camp path", () => {
+    expect(matchRoute("/view/renders/%E3%83%A2%E3%82%AB%20a%2Fb.png")).toEqual({
       index: 1,
-      params: { id: "sumi" },
+      params: { path: "renders/モカ a/b.png" },
     });
   });
 
@@ -29,18 +29,18 @@ describe("router", () => {
   it("navigate() pushes history and updates the route state", () => {
     const teardown = initRouter();
 
-    navigate("/items/kinari");
+    navigate("/view/renders/kinari.png");
 
-    expect(window.location.pathname).toBe("/items/kinari");
+    expect(window.location.pathname).toBe("/view/renders/kinari.png");
     expect(router.index).toBe(1);
-    expect(router.params.id).toBe("kinari");
+    expect(router.params.path).toBe("renders/kinari.png");
     teardown();
   });
 
   it("the browser back button returns to the previous route", async () => {
     const teardown = initRouter();
     window.history.replaceState(null, "", "/");
-    navigate("/items/kinari");
+    navigate("/view/renders/kinari.png");
 
     window.history.back();
 
@@ -52,13 +52,13 @@ describe("router", () => {
   it("intercepts clicks on internal links", () => {
     const teardown = initRouter();
     const anchor = document.createElement("a");
-    anchor.href = "/items/sumi";
+    anchor.href = "/view/renders/sumi.png";
     anchor.textContent = "card";
     document.body.appendChild(anchor);
 
     anchor.click();
 
-    expect(window.location.pathname).toBe("/items/sumi");
+    expect(window.location.pathname).toBe("/view/renders/sumi.png");
     expect(router.index).toBe(1);
     anchor.remove();
     teardown();

@@ -10,7 +10,7 @@ interface RouteDef {
 
 export const routes: RouteDef[] = [
   { pattern: /^\/$/, params: [] },
-  { pattern: /^\/items\/([^/]+)$/, params: ["id"] },
+  { pattern: /^\/view\/(.+)$/, params: ["path"] },
 ];
 
 export function matchRoute(pathname: string): RouteMatch {
@@ -19,7 +19,10 @@ export function matchRoute(pathname: string): RouteMatch {
     if (found) {
       const params: Record<string, string> = {};
       route.params.forEach((name, position) => {
-        params[name] = decodeURIComponent(found[position + 1]);
+        params[name] = found[position + 1]
+          .split("/")
+          .map(decodeURIComponent)
+          .join("/");
       });
       return { index, params };
     }

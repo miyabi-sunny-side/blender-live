@@ -1,22 +1,13 @@
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App.svelte";
 
-const ITEM = {
-  id: "sumi",
-  name: "Sumi ダークテーマ",
-  summary: "概要テキスト",
-  status: "stable",
-  updated_at: "2026-08-01",
-  body: "本文テキスト",
-};
+class SilentEventSource {
+  onmessage = null;
+  onopen = null;
+  close() {}
+}
 
 describe("App", () => {
   afterEach(() => {
@@ -25,33 +16,25 @@ describe("App", () => {
     window.history.replaceState(null, "", "/");
   });
 
-  it("keeps the invariant header and restores a deep detail URL", async () => {
+  it("keeps the invariant header and restores a deep viewer URL", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn<typeof fetch>().mockImplementation((input) => {
-        const payload = String(input) === "/api/items" ? [ITEM] : ITEM;
-        return Promise.resolve(
-          new Response(JSON.stringify(payload), { status: 200 }),
-        );
-      }),
+      vi.fn<typeof fetch>().mockResolvedValue(new Response("[]")),
     );
-    window.history.replaceState(null, "", "/items/sumi");
+    vi.stubGlobal("EventSource", SilentEventSource);
+    window.history.replaceState(null, "", "/view/renders/cube.png");
 
     render(App);
 
     const header = screen.getByRole("banner");
     const title = header.querySelector('a[href="/"]');
-    expect(title?.textContent).toContain("rust-svelte-template");
+    expect(title?.textContent).toContain("blender-live");
     expect(screen.getByRole("button", { name: "メニュー" })).toBeTruthy();
     expect(header.querySelectorAll("a, button")).toHaveLength(2);
-
-    await waitFor(() =>
-      expect(screen.getByRole("heading", { name: ITEM.name })).toBeTruthy(),
-    );
-    const subHeader = document.querySelector(".sub-header");
-    expect(subHeader?.querySelectorAll("a, button")).toHaveLength(0);
+    expect(screen.getByRole("heading", { name: "cube.png" })).toBeTruthy();
 
     await fireEvent.click(title as HTMLElement);
     expect(window.location.pathname).toBe("/");
+    expect(screen.getByRole("heading", { name: "書き出し" })).toBeTruthy();
   });
 });
