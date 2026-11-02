@@ -109,6 +109,27 @@ test("a job shows progress, can be cancelled, and a finished video plays", async
   expect(played.duration).toBeCloseTo(1, 1);
 });
 
+test("the download buttons save the file instead of changing the page", async ({
+  page,
+}) => {
+  const name = `saved-${Date.now()}.png`;
+  writeFileSync(join(CAMP, "renders", name), "png");
+
+  await page.goto(`/view/renders/${name}`);
+  const fromView = page.waitForEvent("download");
+  await page.getByRole("link", { name: "ダウンロード" }).click();
+  expect((await fromView).suggestedFilename()).toBe(name);
+  await expect(page).toHaveURL(`/view/renders/${name}`);
+
+  const scene = `saved-${Date.now()}.blend`;
+  writeFileSync(join(CAMP, "scenes", scene), "blend");
+  await page.goto("/");
+  const fromHome = page.waitForEvent("download");
+  await page.getByRole("link", { name: `${scene} をダウンロード` }).click();
+  expect((await fromHome).suggestedFilename()).toBe(scene);
+  await expect(page).toHaveURL("/");
+});
+
 test("a crash is reported with the lost scene", async ({ page }) => {
   await mcp(page.request, "python", { code: "x = 1" });
   await mcp(page.request, "python", { code: "import os\nos._exit(1)" });

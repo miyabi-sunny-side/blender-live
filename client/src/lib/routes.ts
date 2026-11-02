@@ -29,3 +29,9 @@ export function matchRoute(pathname: string): RouteMatch {
   }
   return { index: 0, params: {} };
 }
+
+/** Whether the page renders `pathname` itself; other paths, such as
+ * `/files/`, belong to the server. */
+export function isClientRoute(pathname: string): boolean {
+  return routes.some((route) => route.pattern.test(pathname));
+}

@@ -1,4 +1,4 @@
-import { matchRoute } from "./routes";
+import { isClientRoute, matchRoute } from "./routes";
 
 const current = $state<{ index: number; params: Record<string, string> }>({
   index: 0,
@@ -35,11 +35,15 @@ function onDocumentClick(event: MouseEvent): void {
   }
   const target = event.target as Element | null;
   const anchor = target?.closest<HTMLAnchorElement>("a[href]");
-  if (!anchor || anchor.target === "_blank") {
+  if (
+    !anchor ||
+    anchor.target === "_blank" ||
+    anchor.hasAttribute("download")
+  ) {
     return;
   }
   const href = anchor.getAttribute("href");
-  if (!href || !href.startsWith("/")) {
+  if (!href || !href.startsWith("/") || !isClientRoute(anchor.pathname)) {
     return;
   }
   event.preventDefault();

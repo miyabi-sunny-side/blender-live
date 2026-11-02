@@ -63,4 +63,41 @@ describe("router", () => {
     anchor.remove();
     teardown();
   });
+
+  // Records whether the router took the click, then stops jsdom's own
+  // navigation, which it does not implement.
+  function clickOutcome(anchor: HTMLAnchorElement): boolean {
+    let prevented = false;
+    const record = (event: Event) => {
+      prevented = event.defaultPrevented;
+      event.preventDefault();
+    };
+    window.addEventListener("click", record);
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.removeEventListener("click", record);
+    return prevented;
+  }
+
+  it("leaves download links to the browser", () => {
+    const teardown = initRouter();
+    const anchor = document.createElement("a");
+    anchor.href = "/view/renders/sumi.png";
+    anchor.download = "";
+
+    expect(clickOutcome(anchor)).toBe(false);
+    expect(window.location.pathname).toBe("/");
+    teardown();
+  });
+
+  it("leaves links to server paths such as /files/ to the browser", () => {
+    const teardown = initRouter();
+    const anchor = document.createElement("a");
+    anchor.href = "/files/renders/presentation.mp4?download=1";
+
+    expect(clickOutcome(anchor)).toBe(false);
+    expect(window.location.pathname).toBe("/");
+    teardown();
+  });
 });
