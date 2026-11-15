@@ -81,7 +81,7 @@ pub struct Still {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Anim {
-    /// Stem for `renders/{name}.mp4` and `renders/{name}/frame_NNNN.png` (default `clip-<UTC time>`).
+    /// Stem for `renders/{name}.mp4` (default `clip-<UTC time>`). Reusing a name overwrites.
     pub name: Option<String>,
     /// First frame (default: the scene's `frame_start`).
     pub frame_start: Option<i32>,
@@ -267,7 +267,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Start a background job that renders a frame range to renders/{name}/frame_NNNN.png and encodes renders/{name}.mp4 (H.264, optional audio). Returns the job; poll job_status, stop with job_cancel. Other Blender tools are refused while frames render."
+        description = "Start a background job that renders a frame range and encodes renders/{name}.mp4 (H.264, optional audio). The frames go straight to the encoder and are not kept; the MP4 appears when the job is done. Returns the job; poll job_status, stop with job_cancel. Other Blender tools are refused while frames render."
     )]
     async fn render_animation(
         &self,
@@ -298,7 +298,9 @@ impl Tools {
         }
     }
 
-    #[tool(description = "Progress of one animation job, or every job newest first.")]
+    #[tool(
+        description = "Progress of one animation job, or every job newest first. outputs lists the MP4 once the job is done. temp_in_camp is true when the temp directory had no room and the frames waited under the base camp instead."
+    )]
     fn job_status(&self, Parameters(a): Parameters<MaybeJobId>) -> CallToolResult {
         let jobs = self.state.jobs.lock().expect("jobs lock");
         match a.id {
@@ -311,7 +313,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Cancel an animation job. Rendering stops after the current frame; frames already written stay."
+        description = "Cancel an animation job. Rendering stops after the current frame and no MP4 is written; an earlier renders/{name}.mp4 stays as it was."
     )]
     fn job_cancel(&self, Parameters(a): Parameters<JobId>) -> CallToolResult {
         match render::cancel(&self.state, &a.id) {

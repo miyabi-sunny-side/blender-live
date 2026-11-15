@@ -48,7 +48,7 @@ these directories if missing:
 | `scenes/` | `.blend` files |
 | `assets/` | models, textures and audio |
 | `scripts/` | Python scripts that rebuild scenes repeatably |
-| `renders/` | stills (`name.png`), videos (`name.mp4`) and their frames (`name/frame_0001.png`) |
+| `renders/` | stills (`name.png`) and videos (`name.mp4`) |
 
 Open `http://<host>:5014/` in a browser. The server listens on all interfaces and has no
 authentication, so run it only on a trusted network.
@@ -74,12 +74,18 @@ symlink that points outside — is refused. Python itself is not sandboxed.
 | `scene_summary` | Collections, objects with transforms, cameras, lights, frame range, fps, render engine, resolution and Cycles GPUs. |
 | `open_blend`, `save_blend`, `new_blend` | Opens a `.blend`, saves (in place or as a new path), or starts from the startup or an empty scene. |
 | `render_still` | Renders `renders/{name}.png` with optional camera, frame, size, engine (`cycles`, `eevee`, `workbench`) and samples. Returns the image and its file and viewer URLs. |
-| `render_animation` | Starts a job that renders a frame range to `renders/{name}/frame_NNNN.png` and encodes `renders/{name}.mp4` (H.264), optionally with an audio file from the base camp. |
-| `job_status`, `job_cancel` | Progress of the jobs; cancelling stops after the current frame and keeps the frames written so far. |
+| `render_animation` | Starts a job that renders a frame range and encodes `renders/{name}.mp4` (H.264), optionally with an audio file from the base camp. The frames are not kept. |
+| `job_status`, `job_cancel` | Progress of the jobs; cancelling stops after the current frame and writes no video, so an earlier `renders/{name}.mp4` stays as it was. |
 | `status` | Process state, GPUs, the open `.blend`, unsaved changes, restarts and what the last crash lost. |
 | `list_files` | Lists `renders`, `scenes`, `scripts` or `assets`, newest first. |
 
 While a job is rendering frames, the other Blender tools answer `busy` instead of waiting.
+
+A job hands each frame to ffmpeg as soon as it is rendered and then removes it, so only a few
+frames exist at a time. They wait in the system temp directory (in memory on many Linux systems),
+and only the finished video is written to the base camp. With less than 256 MiB free there, the
+frames wait in `.tmp/` under the base camp instead and the job reports `temp_in_camp`; a job that
+runs out of room midway starts over.
 
 ### Register with Claude Code
 

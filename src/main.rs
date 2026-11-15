@@ -15,6 +15,8 @@ use tracing::info;
 
 /// How long requests in flight get to finish after a stop signal.
 const STOP_GRACE: Duration = Duration::from_secs(2);
+/// Free space the temp directory needs before a job keeps its frames there.
+const SCRATCH_RESERVE: u64 = 256 << 20;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -51,6 +53,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         camp,
         grace: Duration::from_secs(30),
         gpu_retry: GpuRetry::default(),
+        scratch_reserve: SCRATCH_RESERVE,
     })
     .await?;
     events::forward_status(blender.subscribe(), bus.clone());
@@ -79,6 +82,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    // Tasks that still hold Blender end with the runtime, after this.
+    blender.remove_temp();
     info!("server stopped");
     Ok(())
 }

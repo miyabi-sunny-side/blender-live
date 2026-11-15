@@ -48,8 +48,12 @@ pub struct Job {
     pub phase: Phase,
     pub cancel_requested: bool,
     pub error: Option<String>,
-    /// Base camp paths of the MP4 and the frame directory.
+    /// Base camp path of the MP4 once the job is done. A cancelled or failed
+    /// job leaves nothing, and an earlier video of the same name stays.
     pub outputs: Vec<String>,
+    /// The temp directory had no room, so the frames waiting for ffmpeg are
+    /// written under the base camp instead.
+    pub temp_in_camp: bool,
 }
 
 impl Job {
@@ -74,6 +78,7 @@ impl Job {
             cancel_requested: false,
             error: None,
             outputs: Vec::new(),
+            temp_in_camp: false,
         })
     }
 
@@ -117,11 +122,19 @@ impl Job {
         Ok(())
     }
 
-    /// `kept` lists what the job left behind, such as frames already written.
-    pub fn cancelled(&mut self, kept: Vec<String>) -> Result<(), JobError> {
+    pub fn cancelled(&mut self) -> Result<(), JobError> {
         self.expect_active()?;
         self.phase = Phase::Cancelled;
-        self.outputs = kept;
+        Ok(())
+    }
+
+    /// The temp directory ran out of room: the job goes on under the base
+    /// camp, from its first frame when some were already rendered.
+    pub fn moved_to_camp(&mut self) -> Result<(), JobError> {
+        self.expect_active()?;
+        self.temp_in_camp = true;
+        self.done_frames = 0;
+        self.phase = Phase::Rendering;
         Ok(())
     }
 
@@ -264,7 +277,7 @@ mod tests {
         assert_eq!(job.phase, Phase::Failed);
         assert_eq!(job.error.as_deref(), Some("boom"));
         assert_eq!(job.request_cancel(), Err(JobError::NotActive));
-        assert_eq!(job.cancelled(vec![]), Err(JobError::NotActive));
+        assert_eq!(job.cancelled(), Err(JobError::NotActive));
         assert_eq!(
             job.frames_finished(),
             Err(JobError::WrongPhase(Phase::Failed))
@@ -282,10 +295,27 @@ mod tests {
         job.request_cancel().unwrap();
         assert!(job.cancel_requested, "request not recorded");
         assert!(job.is_active(), "cancel waits for the bridge");
-        job.cancelled(vec!["renders/clip".into()]).unwrap();
+        job.cancelled().unwrap();
         assert_eq!(job.phase, Phase::Cancelled);
         assert_eq!(job.done_frames, 3);
-        assert_eq!(job.outputs, ["renders/clip"], "kept frames not listed");
+        assert_eq!(job.outputs, [""; 0], "a cancelled job left outputs");
+    }
+
+    #[test]
+    fn moving_to_the_camp_starts_the_frames_over() {
+        let mut job = job("a", 1, 4);
+        assert!(
+            !job.temp_in_camp,
+            "new jobs start outside the temp directory"
+        );
+        job.frame_rendered(4).unwrap();
+        job.frames_finished().unwrap();
+        job.moved_to_camp().unwrap();
+        assert!(job.temp_in_camp, "the move is not recorded");
+        assert_eq!((job.phase, job.done_frames), (Phase::Rendering, 0));
+        job.frame_rendered(1).unwrap();
+        job.cancelled().unwrap();
+        assert_eq!(job.moved_to_camp(), Err(JobError::NotActive));
     }
 
     #[test]
@@ -294,15 +324,12 @@ mod tests {
         book.start(job("a", 1, 2)).unwrap();
         assert_eq!(book.active().map(|j| j.id.as_str()), Some("a"));
         assert_eq!(book.start(job("b", 1, 2)), Err(JobError::Busy("a".into())));
-        book.update("a", |j| j.cancelled(vec![])).unwrap();
+        book.update("a", Job::cancelled).unwrap();
         assert_eq!(book.active(), None);
         book.start(job("b", 1, 2)).unwrap();
         let ids: Vec<_> = book.list().into_iter().map(|j| j.id).collect();
         assert_eq!(ids, ["b", "a"]);
         assert_eq!(book.get("b").map(|j| j.phase), Some(Phase::Rendering));
-        assert_eq!(
-            book.update("zz", |j| j.cancelled(vec![])),
-            Err(JobError::NotFound)
-        );
+        assert_eq!(book.update("zz", Job::cancelled), Err(JobError::NotFound));
     }
 }

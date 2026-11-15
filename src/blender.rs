@@ -3,6 +3,7 @@ use crate::{
     basecamp::BaseCamp,
     gpu::GpuRetry,
     protocol::{Message, Op, Reply, parse_message, request_line},
+    scratch::{CAMP_DIR, free_bytes, roomy},
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -50,6 +51,9 @@ pub struct Config {
     pub grace: Duration,
     /// Pacing of the checks made while Blender runs without a GPU.
     pub gpu_retry: GpuRetry,
+    /// Free bytes the temp directory needs before a job keeps its frames
+    /// there; with less they go under the base camp.
+    pub scratch_reserve: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -193,13 +197,13 @@ pub struct Blender {
     /// When the last request ended; `None` for a process nobody has used.
     last_request: StdMutex<Option<Instant>>,
     stopping: watch::Sender<bool>,
-    /// Private directory for the bridge script and the sockets.
+    /// Private directory for the bridge script, the sockets and the jobs' frames.
     run_dir: PathBuf,
 }
 
 impl Drop for Blender {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.run_dir);
+        self.remove_temp();
     }
 }
 
@@ -285,6 +289,22 @@ impl Blender {
 
     pub fn camp(&self) -> &BaseCamp {
         &self.cfg.camp
+    }
+
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+
+    /// Whether a job may keep its frames in the run directory.
+    pub fn temp_has_room(&self) -> bool {
+        roomy(&free_bytes(&self.run_dir), self.cfg.scratch_reserve)
+    }
+
+    /// Removes the run directory and what jobs left under the base camp.
+    /// For the end of the process: nothing can use Blender afterwards.
+    pub fn remove_temp(&self) {
+        let _ = std::fs::remove_dir_all(&self.run_dir);
+        let _ = std::fs::remove_dir_all(self.cfg.camp.root().join(CAMP_DIR));
     }
 
     pub async fn call(

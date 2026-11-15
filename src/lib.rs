@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod naming;
 pub mod protocol;
 pub mod render;
+pub mod scratch;
 
 use std::{
     collections::HashMap,

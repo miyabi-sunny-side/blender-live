@@ -1,12 +1,13 @@
-//! Render requests that write into `renders/`: stills and animation jobs.
+//! Render requests that end in `renders/`: stills and animation jobs.
 use crate::{
     AppState,
     blender::{CallError, Outcome},
-    encode::{Encode, ffmpeg_args},
+    encode::{Encode, encode, ffmpeg_args, frame_file},
     events::Event,
     job::{Job, JobError, Phase},
     naming::output_name,
     protocol::{Op, Shot},
+    scratch::Scratch,
 };
 use serde_json::Value;
 use std::{
@@ -14,7 +15,7 @@ use std::{
     time::Instant,
 };
 use time::OffsetDateTime;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
 pub struct Still {
@@ -78,8 +79,8 @@ pub struct Animation {
     pub shot: Shot,
 }
 
-/// Starts an animation job: frames into `renders/{name}/`, then
-/// `renders/{name}.mp4`. Returns as soon as the job is registered.
+/// Starts an animation job that ends in `renders/{name}.mp4`. Returns as
+/// soon as the job is registered.
 pub async fn animation(state: &AppState, a: Animation) -> Result<Job, String> {
     ensure_idle(state)?;
     let name = output_name(a.name.as_deref(), "clip", "mp4", OffsetDateTime::now_utc())
@@ -88,12 +89,6 @@ pub async fn animation(state: &AppState, a: Animation) -> Result<Job, String> {
     let mp4 = camp
         .writable(&format!("renders/{name}.mp4"))
         .map_err(|e| e.to_string())?;
-    let frames = camp
-        .writable(&format!("renders/{name}/frame_0001.png"))
-        .map_err(|e| e.to_string())?
-        .parent()
-        .expect("frame paths have a parent")
-        .to_path_buf();
     let audio = match &a.audio {
         Some(rel) => Some(
             camp.existing(rel)
@@ -101,22 +96,25 @@ pub async fn animation(state: &AppState, a: Animation) -> Result<Job, String> {
         ),
         None => None,
     };
-    clear_frames(&frames).map_err(|e| format!("cannot clear old frames: {e}"))?;
 
-    let range = if a.frame_start.is_none() || a.frame_end.is_none() {
-        let summary = state
+    // ffmpeg starts with the first frame, so the rate is needed up front.
+    let scene = if a.frame_start.is_none() || a.frame_end.is_none() || a.fps.is_none() {
+        state
             .blender
             .call(Op::Summary, None)
             .await
             .map_err(|e| describe(&e))?
-            .value;
-        let get = |key| summary[key].as_i64().and_then(|v| i32::try_from(v).ok());
-        (get("frame_start"), get("frame_end"))
+            .value
     } else {
-        (None, None)
+        Value::Null
     };
-    let frame_start = a.frame_start.or(range.0).unwrap_or(1);
-    let frame_end = a.frame_end.or(range.1).unwrap_or(frame_start);
+    let frame = |key| scene[key].as_i64().and_then(|v| i32::try_from(v).ok());
+    let frame_start = a.frame_start.or_else(|| frame("frame_start")).unwrap_or(1);
+    let frame_end = a
+        .frame_end
+        .or_else(|| frame("frame_end"))
+        .unwrap_or(frame_start);
+    let fps = a.fps.or_else(|| scene["fps"].as_f64()).unwrap_or(24.0);
 
     let id = format!(
         "{:x}",
@@ -145,12 +143,11 @@ pub async fn animation(state: &AppState, a: Animation) -> Result<Job, String> {
         Plan {
             id,
             name,
-            frames,
             mp4,
             audio,
             frame_start,
             frame_end,
-            fps: a.fps,
+            fps,
             shot: a.shot,
         },
         cancel_rx,
@@ -161,71 +158,163 @@ pub async fn animation(state: &AppState, a: Animation) -> Result<Job, String> {
 struct Plan {
     id: String,
     name: String,
-    frames: PathBuf,
     mp4: PathBuf,
     audio: Option<PathBuf>,
     frame_start: i32,
     frame_end: i32,
-    fps: Option<f64>,
+    fps: f64,
     shot: Shot,
 }
 
-/// Renders the frames, encodes the MP4 and records each step on the job.
+/// How one pass over the frames ended.
+enum End {
+    Done,
+    Cancelled,
+    Failed(String),
+    /// Blender itself went away, and the scene with it.
+    Lost(String),
+}
+
+/// Renders and encodes, and records how the job ended. The frames wait for
+/// ffmpeg in the temp directory; when that has no room, before or during
+/// the job, the job runs under the base camp instead.
 async fn run(state: AppState, p: Plan, cancel: watch::Receiver<bool>) {
     let id = p.id.as_str();
-    let op = Op::RenderFrames {
-        dir: p.frames.to_string_lossy().into_owned(),
-        frame_start: p.frame_start,
-        frame_end: p.frame_end,
-        shot: p.shot,
+    let blender = &state.blender;
+    let temp = if blender.temp_has_room() {
+        Scratch::temp(blender.run_dir(), id).map_err(|e| e.to_string())
+    } else {
+        Err("less space is free than a job needs".into())
     };
-    let progress_state = state.clone();
-    let progress_id = p.id.clone();
-    let result = state
-        .blender
-        .call_with_progress(op, Some(cancel.clone()), move |done, _| {
-            update(&progress_state, &progress_id, |j| j.frame_rendered(done));
-        })
-        .await;
-    match result {
-        Ok(outcome) => {
-            update(&state, id, Job::frames_finished);
-            let encode = Encode {
-                frames_dir: &p.frames,
-                frame_start: p.frame_start,
-                fps: p
-                    .fps
-                    .or_else(|| outcome.value["fps"].as_f64())
-                    .unwrap_or(24.0),
-                audio: p.audio.as_deref(),
-                output: &p.mp4,
-            };
-            match run_ffmpeg(&encode, cancel).await {
-                Ok(true) => update(&state, id, |j| {
-                    j.encoded(vec![
-                        format!("renders/{}.mp4", p.name),
-                        format!("renders/{}", p.name),
-                    ])
-                }),
-                Ok(false) => update(&state, id, |j| j.cancelled(kept(&p.name, j))),
-                Err(e) => update(&state, id, |j| j.failed(e)),
-            }
+    let (mut end, full) = match &temp {
+        Ok(scratch) => {
+            let end = pass(&state, &p, scratch, cancel.clone()).await;
+            // Measured while the job's own files are still there: they count.
+            (end, !blender.temp_has_room())
         }
-        Err(CallError::Failed {
-            cancelled: true, ..
-        }) => update(&state, id, |j| j.cancelled(kept(&p.name, j))),
-        Err(e) => update(&state, id, |j| j.failed(describe(&e))),
+        Err(e) => (
+            End::Failed(format!("the temp directory cannot be used: {e}")),
+            true,
+        ),
+    };
+    drop(temp);
+    if let End::Failed(why) = &end
+        && full
+    {
+        warn!(
+            id,
+            "the temp directory has no room ({why}); the job runs under the base camp"
+        );
+        end = match Scratch::camp(state.camp(), id) {
+            Ok(scratch) => {
+                update(&state, id, Job::moved_to_camp);
+                pass(&state, &p, &scratch, cancel).await
+            }
+            Err(e) => End::Failed(format!("no room for the frames: {why}; base camp: {e}")),
+        };
+    }
+    match end {
+        End::Done => update(&state, id, |j| {
+            j.encoded(vec![format!("renders/{}.mp4", p.name)])
+        }),
+        End::Cancelled => update(&state, id, Job::cancelled),
+        End::Failed(e) | End::Lost(e) => update(&state, id, |j| j.failed(e)),
     }
     state.cancels.lock().expect("cancels lock").remove(id);
 }
 
-/// The frame directory, when the cancelled job wrote any frames.
-fn kept(name: &str, job: &Job) -> Vec<String> {
-    if job.done_frames > 0 {
-        vec![format!("renders/{name}")]
-    } else {
-        Vec::new()
+/// Renders every frame into `scratch`, hands each one to ffmpeg as it is
+/// done and moves the finished MP4 into the base camp.
+async fn pass(
+    state: &AppState,
+    p: &Plan,
+    scratch: &Scratch,
+    mut cancel: watch::Receiver<bool>,
+) -> End {
+    let id = p.id.as_str();
+    let dir = scratch.frames();
+    let out = scratch.mp4();
+    // Closed when the render call is over, which lets ffmpeg finish the MP4.
+    let (frame_tx, frame_rx) = mpsc::unbounded_channel();
+    let encoding = encode(
+        ffmpeg_args(&Encode {
+            fps: p.fps,
+            audio: p.audio.as_deref(),
+            output: &out,
+        }),
+        frame_rx,
+    );
+    tokio::pin!(encoding);
+
+    // Stops Blender for the user's cancel and when ffmpeg gives up.
+    let (halt, halted) = watch::channel(false);
+    let op = Op::RenderFrames {
+        dir: dir.to_string_lossy().into_owned(),
+        frame_start: p.frame_start,
+        frame_end: p.frame_end,
+        shot: p.shot.clone(),
+    };
+    let rendering = state
+        .blender
+        .call_with_progress(op, Some(halted), move |done, _| {
+            update(state, id, |j| j.frame_rendered(done));
+            let frame = p
+                .frame_start
+                .saturating_add_unsigned(done.saturating_sub(1));
+            let _ = frame_tx.send(frame_file(&dir, frame));
+        });
+    tokio::pin!(rendering);
+    let mut encoded = None;
+    let rendered = loop {
+        tokio::select! {
+            rendered = &mut rendering => break rendered,
+            // ffmpeg only ends before the last frame when it failed.
+            result = &mut encoding, if encoded.is_none() => {
+                encoded = Some(result);
+                halt.send_replace(true);
+            }
+            _ = cancel.wait_for(|c| *c), if !*halt.borrow() => {
+                halt.send_replace(true);
+            }
+        }
+    };
+    match rendered {
+        Ok(_) => {
+            update(state, id, Job::frames_finished);
+            let encoded = if let Some(result) = encoded {
+                result
+            } else {
+                tokio::select! {
+                    result = &mut encoding => result,
+                    _ = cancel.wait_for(|c| *c) => return End::Cancelled,
+                }
+            };
+            match encoded {
+                Ok(()) => match keep(&out, &p.mp4).await {
+                    Ok(()) => End::Done,
+                    Err(e) => End::Failed(format!("cannot save renders/{}.mp4: {e}", p.name)),
+                },
+                Err(e) => End::Failed(e),
+            }
+        }
+        Err(CallError::Failed {
+            cancelled: true, ..
+        }) => match encoded {
+            Some(Err(e)) => End::Failed(e),
+            _ => End::Cancelled,
+        },
+        Err(e @ CallError::Failed { .. }) => End::Failed(describe(&e)),
+        Err(e) => End::Lost(describe(&e)),
     }
+}
+
+/// Moves the finished MP4 into the base camp, replacing an earlier one.
+async fn keep(from: &Path, to: &Path) -> std::io::Result<()> {
+    // The temp directory is usually another file system than the camp.
+    if tokio::fs::rename(from, to).await.is_ok() {
+        return Ok(());
+    }
+    tokio::fs::copy(from, to).await.map(|_| ())
 }
 
 pub fn cancel(state: &AppState, id: &str) -> Result<Job, JobError> {
@@ -251,53 +340,6 @@ fn update(state: &AppState, id: &str, f: impl FnOnce(&mut Job) -> Result<(), Job
 pub fn publish_jobs(state: &AppState) {
     let jobs = state.jobs.lock().expect("jobs lock").list();
     let _ = state.bus.send(Event::Jobs(jobs));
-}
-
-fn clear_frames(dir: &Path) -> std::io::Result<()> {
-    for item in std::fs::read_dir(dir)? {
-        let path = item?.path();
-        let is_frame = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("frame_"))
-            && path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("png"));
-        if is_frame {
-            std::fs::remove_file(path)?;
-        }
-    }
-    Ok(())
-}
-
-/// `Ok(false)` when the job was cancelled during the encode.
-async fn run_ffmpeg(e: &Encode<'_>, mut cancel: watch::Receiver<bool>) -> Result<bool, String> {
-    let mut child = tokio::process::Command::new("ffmpeg")
-        .args(ffmpeg_args(e))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|err| format!("cannot run ffmpeg: {err}"))?;
-    let mut stderr = child.stderr.take().expect("stderr is piped");
-    let read_stderr = async {
-        let mut text = String::new();
-        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut text).await;
-        text
-    };
-    let wait = async {
-        let (status, text) = tokio::join!(child.wait(), read_stderr);
-        (status, text)
-    };
-    tokio::select! {
-        (status, text) = wait => match status {
-            Ok(s) if s.success() => Ok(true),
-            Ok(s) => Err(format!("ffmpeg failed ({s}): {}", text.trim())),
-            Err(err) => Err(format!("ffmpeg failed: {err}")),
-        },
-        _ = cancel.wait_for(|c| *c) => Ok(false),
-    }
 }
 
 /// One message for the agent, keeping the Python traceback when there is one.

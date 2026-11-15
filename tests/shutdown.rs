@@ -92,6 +92,7 @@ fn alive(pid: &str) -> bool {
 #[test]
 fn a_stop_signal_ends_the_server_while_streams_are_open() {
     let camp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = reservation.local_addr().unwrap();
     drop(reservation);
@@ -100,6 +101,7 @@ fn a_stop_signal_ends_the_server_while_streams_are_open() {
             .arg(camp.path())
             .env("PORT", address.port().to_string())
             .env("LOG_LEVEL", "info")
+            .env("TMPDIR", tmp.path())
             .env(
                 "BLENDER_BIN",
                 concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_blender.py"),
@@ -163,4 +165,9 @@ fn a_stop_signal_ends_the_server_while_streams_are_open() {
         "Blender was started again while stopping:\n{log}"
     );
     assert!(!alive(&blender), "Blender outlived the server");
+    let left: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|item| item.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "temporary files stayed: {left:?}");
 }

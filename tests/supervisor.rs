@@ -24,6 +24,7 @@ fn config(dir: &Path) -> Config {
             max: Duration::from_millis(200),
             quiet: Duration::ZERO,
         },
+        scratch_reserve: 0,
     }
 }
 

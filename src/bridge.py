@@ -50,6 +50,10 @@ class Cancelled(Exception):
     pass
 
 
+# Frames that may wait for ffmpeg before the next one is rendered.
+PENDING_FRAMES = 4
+
+
 def setup_gpu():
     """Uses OptiX (else CUDA) on every visible NVIDIA GPU for Cycles."""
     prefs = bpy.context.preferences.addons["cycles"].preferences
@@ -248,9 +252,13 @@ def op_render_frames(req, conn):
     total = end - start + 1
     started = time.monotonic()
     for done, frame in enumerate(range(start, end + 1), 1):
-        message = conn.line(timeout=0)
-        if message is not None and message.get("op") == "cancel":
-            raise Cancelled(f"cancelled after {done - 1} of {total} frames")
+        # blender-live removes each frame it handed to ffmpeg.
+        waiting = True
+        while waiting:
+            waiting = len(os.listdir(req["dir"])) >= PENDING_FRAMES
+            message = conn.line(timeout=0.05 if waiting else 0)
+            if message is not None and message.get("op") == "cancel":
+                raise Cancelled(f"cancelled after {done - 1} of {total} frames")
         scene.frame_set(frame)
         render_to(os.path.join(req["dir"], f"frame_{frame:04d}.png"))
         conn.send({"type": "progress", "id": req["id"], "done": done, "total": total})
