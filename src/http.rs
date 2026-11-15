@@ -241,6 +241,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_page_links_a_favicon_that_is_served_as_svg() {
+        let response = get("/").await;
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+        let icon = html
+            .split("<link rel=\"icon\" href=\"")
+            .nth(1)
+            .and_then(|part| part.split('"').next())
+            .expect("compiled HTML links its icon");
+
+        let response = get(icon).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/svg+xml");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body.starts_with(b"<svg "));
+    }
+
+    #[tokio::test]
     async fn ui_rejects_mutating_requests() {
         let response = shell::<()>()
             .oneshot(
