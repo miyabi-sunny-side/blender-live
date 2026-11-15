@@ -1,6 +1,7 @@
 //! Keeps one `blender -b` process alive and hands it one request at a time.
 use crate::{
     basecamp::BaseCamp,
+    gpu::GpuRetry,
     protocol::{Message, Op, Reply, parse_message, request_line},
 };
 use serde::Serialize;
@@ -9,7 +10,7 @@ use std::{
     collections::VecDeque,
     fmt,
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     process::{ExitStatus, Stdio},
     sync::{
@@ -24,7 +25,7 @@ use tokio::{
         UnixListener,
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
-    process::Command,
+    process::{Child, Command},
     sync::{Mutex, oneshot, watch},
 };
 use tracing::{debug, info, warn};
@@ -34,6 +35,10 @@ const READY_TIMEOUT: Duration = Duration::from_mins(2);
 const QUICK_TIMEOUT: Duration = Duration::from_mins(5);
 const STILL_TIMEOUT: Duration = Duration::from_hours(1);
 const LOG_TAIL: usize = 30;
+/// A stop signal usually reaches Blender and this process together; an exit
+/// waits this long for it before it counts as a crash.
+const STOP_SETTLE: Duration = Duration::from_millis(300);
+const STOPPING: &str = "blender-live is stopping";
 
 pub struct Config {
     /// The Blender executable.
@@ -43,6 +48,8 @@ pub struct Config {
     pub camp: BaseCamp,
     /// Extra time after a Python timeout before the process is killed.
     pub grace: Duration,
+    /// Pacing of the checks made while Blender runs without a GPU.
+    pub gpu_retry: GpuRetry,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -75,6 +82,8 @@ pub struct Status {
     pub version: Option<String>,
     pub device_type: Option<String>,
     pub devices: Vec<String>,
+    /// Why a GPU that is available now is not in use yet.
+    pub gpu_note: Option<String>,
     /// Base camp path of the open `.blend` (absolute when outside).
     pub file: Option<String>,
     pub unsaved: bool,
@@ -116,11 +125,33 @@ impl fmt::Display for CallError {
 
 impl std::error::Error for CallError {}
 
+type Tail = Arc<StdMutex<VecDeque<String>>>;
+
 struct Conn {
-    generation: u64,
+    /// Which launch this is; tells the session's process from older and spare ones.
+    launch: u64,
     lines: Lines<BufReader<OwnedReadHalf>>,
     writer: OwnedWriteHalf,
     kill: Option<oneshot::Sender<()>>,
+    /// The last lines the process printed.
+    tail: Tail,
+}
+
+/// What the bridge reported when its process came up.
+struct Greeting {
+    pid: Option<u32>,
+    version: String,
+    devices: Vec<String>,
+    device_type: Option<String>,
+}
+
+/// The result of one look for a GPU.
+enum Check {
+    /// Blender now runs on the GPU.
+    Recovered,
+    /// A GPU is there, but the session cannot be replaced yet.
+    Waiting,
+    Missing,
 }
 
 impl Conn {
@@ -129,6 +160,19 @@ impl Conn {
             let _ = kill.send(());
         }
     }
+
+    fn tail_text(&self) -> String {
+        tail_text(&self.tail)
+    }
+}
+
+fn tail_text(tail: &Tail) -> String {
+    let tail = tail.lock().expect("log tail lock");
+    tail.iter().cloned().collect::<Vec<_>>().join("\n")
+}
+
+async fn stopped(mut stopping: watch::Receiver<bool>) {
+    let _ = stopping.wait_for(|stopping| *stopping).await;
 }
 
 enum Exchange {
@@ -143,8 +187,12 @@ pub struct Blender {
     conn: Mutex<Option<Conn>>,
     status: watch::Sender<Status>,
     next_id: AtomicU64,
-    generation: AtomicU64,
-    tail: Arc<StdMutex<VecDeque<String>>>,
+    launches: AtomicU64,
+    /// The launch that owns the session.
+    current: AtomicU64,
+    /// When the last request ended; `None` for a process nobody has used.
+    last_request: StdMutex<Option<Instant>>,
+    stopping: watch::Sender<bool>,
     /// Private directory for the bridge script and the sockets.
     run_dir: PathBuf,
 }
@@ -196,13 +244,35 @@ impl Blender {
             conn: Mutex::new(None),
             status: watch::Sender::new(Status::default()),
             next_id: AtomicU64::new(1),
-            generation: AtomicU64::new(0),
-            tail: Arc::default(),
+            launches: AtomicU64::new(0),
+            current: AtomicU64::new(0),
+            last_request: StdMutex::new(None),
+            stopping: watch::Sender::new(false),
             run_dir,
         });
         let conn = blender.spawn().await?;
         *blender.conn.lock().await = Some(conn);
+        tokio::spawn(recover_gpu(
+            Arc::downgrade(&blender),
+            blender.subscribe(),
+            blender.stopping.subscribe(),
+            blender.cfg.gpu_retry,
+        ));
         Ok(blender)
+    }
+
+    /// Ends Blender for good: nothing starts it again and requests are refused.
+    pub fn stop(&self) {
+        self.stopping.send_replace(true);
+    }
+
+    /// Resolves once [`Self::stop`] was called.
+    pub async fn stopped(&self) {
+        stopped(self.stopping.subscribe()).await;
+    }
+
+    fn is_stopping(&self) -> bool {
+        *self.stopping.borrow()
     }
 
     pub fn status(&self) -> Status {
@@ -233,6 +303,9 @@ impl Blender {
         cancel: Option<watch::Receiver<bool>>,
         mut progress: impl FnMut(u32, u32),
     ) -> Result<Outcome, CallError> {
+        if self.is_stopping() {
+            return Err(CallError::Start(STOPPING.into()));
+        }
         let mut slot = self.conn.lock().await;
         if slot.is_none() {
             *slot = Some(self.spawn().await?);
@@ -255,9 +328,10 @@ impl Blender {
         });
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // A crash report should show what this request printed, not older renders.
-        self.tail.lock().expect("log tail lock").clear();
+        conn.tail.lock().expect("log tail lock").clear();
         let started = Instant::now();
         let result = exchange(conn, id, &op, deadline, cancel, &mut progress).await;
+        *self.last_request.lock().expect("last request lock") = Some(Instant::now());
         match result {
             Ok(reply) => {
                 let file = reply.file.as_deref().map(|f| self.display_path(f));
@@ -277,6 +351,7 @@ impl Blender {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
                 conn.kill();
+                let tail = conn.tail_text();
                 *slot = None;
                 self.status.send_modify(|s| {
                     s.state = ProcState::Restarting;
@@ -290,7 +365,7 @@ impl Blender {
                     Exchange::Eof => CallError::Crashed(format!(
                         "Blender exited during {}; it restarts and the unsaved scene is lost. Last output:\n{}",
                         op_name(&op),
-                        self.tail_text()
+                        tail
                     )),
                     Exchange::Broken(e) => CallError::Crashed(e),
                 })
@@ -301,13 +376,13 @@ impl Blender {
     fn display_path(&self, file: &str) -> String {
         self.cfg
             .camp
-            .relative(std::path::Path::new(file))
+            .relative(Path::new(file))
             .unwrap_or_else(|| file.to_owned())
     }
 
-    fn tail_text(&self) -> String {
-        let tail = self.tail.lock().expect("log tail lock");
-        tail.iter().cloned().collect::<Vec<_>>().join("\n")
+    fn idle(&self) -> Option<Duration> {
+        let last = *self.last_request.lock().expect("last request lock");
+        last.map(|at| at.elapsed())
     }
 
     // Boxed so the restart path (spawn → exit watcher → spawn) stays `Send`.
@@ -315,21 +390,94 @@ impl Blender {
         Box::pin(self.spawn_process())
     }
 
+    /// Starts the process that owns the session.
     async fn spawn_process(&self) -> Result<Conn, CallError> {
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.status.send_modify(|s| s.state = ProcState::Starting);
+        let (conn, greeting) = self.launch().await?;
+        Ok(self.adopt(conn, greeting, None))
+    }
+
+    /// Starts a Blender process and waits for its bridge. The process is not
+    /// the session's until it is adopted, and dies with its `Conn`.
+    async fn launch(&self) -> Result<(Conn, Greeting), CallError> {
+        if self.is_stopping() {
+            return Err(CallError::Start(STOPPING.into()));
+        }
+        let launch = self.launches.fetch_add(1, Ordering::SeqCst) + 1;
         let start_err = |e: std::io::Error| CallError::Start(format!("cannot start Blender: {e}"));
-        let bridge = self.run_dir.join("bridge.py");
-        let socket = self.run_dir.join(format!("{generation}.sock"));
+        let socket = self.run_dir.join(format!("{launch}.sock"));
         let _ = std::fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket).map_err(start_err)?;
 
+        let mut child = self.command(&socket).spawn().map_err(start_err)?;
+        let tail = Tail::default();
+        if let Some(out) = child.stdout.take() {
+            forward(out, tail.clone());
+        }
+        if let Some(err) = child.stderr.take() {
+            forward(err, tail.clone());
+        }
+
+        let greeted = async {
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted.map_err(start_err),
+                exit = child.wait() => Err(CallError::Start(format!(
+                    "Blender exited before it was ready ({}):\n{}",
+                    exit.map_or_else(|e| e.to_string(), |s| s.to_string()),
+                    tail_text(&tail)
+                ))),
+                () = tokio::time::sleep(READY_TIMEOUT) => Err(CallError::Start(
+                    "Blender did not connect within 120 s".into(),
+                )),
+            };
+            let (stream, _) = accepted?;
+            let (read, writer) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let ready = tokio::time::timeout(READY_TIMEOUT, lines.next_line()).await;
+            let Ok(Ok(Some(line))) = ready else {
+                return Err(CallError::Start("the bridge never said ready".into()));
+            };
+            let Ok(Message::Ready {
+                version,
+                devices,
+                device_type,
+            }) = parse_message(&line)
+            else {
+                return Err(CallError::Start(format!("unexpected first line: {line}")));
+            };
+            Ok((lines, writer, version, devices, device_type))
+        };
+        let greeted = tokio::select! {
+            greeted = greeted => greeted,
+            () = self.stopped() => Err(CallError::Start(STOPPING.into())),
+        };
+        let _ = std::fs::remove_file(&socket);
+        let (lines, writer, version, devices, device_type) = greeted?;
+        let greeting = Greeting {
+            pid: child.id(),
+            version,
+            devices,
+            device_type,
+        };
+
+        let conn = Conn {
+            launch,
+            lines,
+            writer,
+            kill: Some(self.watch(child, launch)),
+            tail,
+        };
+        Ok((conn, greeting))
+    }
+
+    fn command(&self, socket: &Path) -> Command {
         let mut command = Command::new(&self.cfg.bin);
         command
             .args(["-b", "--python-exit-code", "1", "--python"])
-            .arg(&bridge)
+            .arg(self.run_dir.join("bridge.py"))
             .arg("--")
             .arg("--socket")
-            .arg(&socket)
+            .arg(socket)
             .current_dir(self.cfg.camp.root())
             // Without a display EEVEE draws through headless EGL on a render GPU. An inherited
             // DISPLAY would put it on whatever GPU drives the screen, often an integrated one.
@@ -344,102 +492,154 @@ impl Blender {
                 .env("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
                 .env("CUDA_VISIBLE_DEVICES", gpus);
         }
-        self.status.send_modify(|s| s.state = ProcState::Starting);
-        let mut child = command.spawn().map_err(start_err)?;
-        if let Some(out) = child.stdout.take() {
-            self.forward(out);
-        }
-        if let Some(err) = child.stderr.take() {
-            self.forward(err);
-        }
+        command
+    }
 
-        let accepted = tokio::select! {
-            accepted = listener.accept() => accepted.map_err(start_err),
-            exit = child.wait() => Err(CallError::Start(format!(
-                "Blender exited before it was ready ({}):\n{}",
-                exit.map_or_else(|e| e.to_string(), |s| s.to_string()),
-                self.tail_text()
-            ))),
-            () = tokio::time::sleep(READY_TIMEOUT) => Err(CallError::Start(
-                "Blender did not connect within 120 s".into(),
-            )),
-        };
-        let _ = std::fs::remove_file(&socket);
-        let (stream, _) = accepted?;
-        let (read, writer) = stream.into_split();
-        let mut lines = BufReader::new(read).lines();
-        let ready = tokio::time::timeout(READY_TIMEOUT, lines.next_line()).await;
-        let Ok(Ok(Some(line))) = ready else {
-            return Err(CallError::Start("the bridge never said ready".into()));
-        };
-        let Ok(Message::Ready {
-            version,
-            devices,
-            device_type,
-        }) = parse_message(&line)
-        else {
-            return Err(CallError::Start(format!("unexpected first line: {line}")));
-        };
-        info!(%version, ?devices, ?device_type, pid = child.id(), "Blender ready");
-        self.status.send_modify(|s| {
-            s.state = ProcState::Ready;
-            s.pid = child.id();
-            s.version = Some(version);
-            s.devices = devices;
-            s.device_type = device_type;
-            s.file = None;
-            s.unsaved = false;
-            s.busy_with = None;
-        });
-
+    /// Follows a process to its end. The returned handle ends it early, as
+    /// does dropping the handle or stopping.
+    fn watch(&self, mut child: Child, launch: u64) -> oneshot::Sender<()> {
         let (kill, killed) = oneshot::channel();
         let me = self.me.clone();
+        let stopping = self.stopping.subscribe();
         tokio::spawn(async move {
+            let unwanted = async {
+                tokio::select! {
+                    _ = killed => {}
+                    () = stopped(stopping) => {}
+                }
+            };
             let exit = tokio::select! {
                 exit = child.wait() => exit,
-                _ = killed => {
+                () = unwanted => {
                     let _ = child.start_kill();
                     child.wait().await
                 }
             };
             if let Some(blender) = me.upgrade() {
-                blender.exited(generation, exit.ok()).await;
+                blender.exited(launch, exit.ok()).await;
             }
         });
-        Ok(Conn {
-            generation,
-            lines,
-            writer,
-            kill: Some(kill),
-        })
+        kill
     }
 
-    fn forward(&self, stream: impl AsyncRead + Unpin + Send + 'static) {
-        let tail = self.tail.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stream).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                debug!(target: "blender", "{line}");
-                let mut tail = tail.lock().expect("log tail lock");
-                if tail.len() == LOG_TAIL {
-                    tail.pop_front();
-                }
-                tail.push_back(line);
-            }
+    /// Makes a launched process the session's, with `file` open in it.
+    fn adopt(&self, conn: Conn, greeting: Greeting, file: Option<String>) -> Conn {
+        let Greeting {
+            pid,
+            version,
+            devices,
+            device_type,
+        } = greeting;
+        info!(%version, ?devices, ?device_type, pid, "Blender ready");
+        self.current.store(conn.launch, Ordering::SeqCst);
+        *self.last_request.lock().expect("last request lock") = None;
+        self.status.send_modify(|s| {
+            s.state = ProcState::Ready;
+            s.pid = pid;
+            s.version = Some(version);
+            s.devices = devices;
+            s.device_type = device_type;
+            s.gpu_note = None;
+            s.file = file;
+            s.unsaved = false;
+            s.busy_with = None;
         });
+        conn
+    }
+
+    /// Opens the `.blend` an earlier process had, so saved work is where it was.
+    async fn reopen(&self, conn: &mut Conn, file: &str) -> bool {
+        let Ok(path) = self.cfg.camp.existing(file) else {
+            return false;
+        };
+        let op = Op::Open {
+            path: path.to_string_lossy().into_owned(),
+        };
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let reply = exchange(conn, id, &op, Some(QUICK_TIMEOUT), None, &mut |_, _| {}).await;
+        reply.is_ok_and(|reply| reply.ok)
+    }
+
+    /// Looks for a GPU with a second Blender beside the session, because the
+    /// running one never sees a GPU that came late. If it has one and nothing
+    /// would be lost, it becomes the session; otherwise it is ended again.
+    async fn check_gpu(&self) -> Check {
+        let retry = self.cfg.gpu_retry;
+        let before = self.status();
+        let replaceable = retry.replaceable(&before, self.idle());
+        // Once a GPU was seen, Blender is only started again when it can take over.
+        let unusable = matches!(
+            before.state,
+            ProcState::Starting | ProcState::Restarting | ProcState::Failed
+        );
+        if unusable || (before.gpu_note.is_some() && !replaceable) {
+            return Check::Waiting;
+        }
+        let (mut spare, greeting) = match self.launch().await {
+            Ok(launched) => launched,
+            Err(e) => {
+                debug!("the GPU check could not start Blender: {e}");
+                return Check::Missing;
+            }
+        };
+        if greeting.devices.is_empty() {
+            // A GPU seen by an earlier check is gone again.
+            self.status
+                .send_if_modified(|s| s.gpu_note.take().is_some());
+            return Check::Missing;
+        }
+
+        let before = self.status();
+        if !before.devices.is_empty() {
+            return Check::Recovered;
+        }
+        if retry.replaceable(&before, self.idle()) {
+            if let Some(file) = &before.file
+                && !self.reopen(&mut spare, file).await
+            {
+                debug!(file, "the GPU check could not reopen the .blend");
+                return Check::Missing;
+            }
+            if let Ok(mut slot) = self.conn.try_lock() {
+                let now = self.status();
+                if retry.replaceable(&now, self.idle())
+                    && (now.pid, &now.file) == (before.pid, &before.file)
+                {
+                    *slot = Some(self.adopt(spare, greeting, before.file));
+                    info!("Blender was replaced by a new process that sees the GPU");
+                    return Check::Recovered;
+                }
+            }
+        }
+        self.status.send_if_modified(|s| {
+            let waiting = s.devices.is_empty() && s.gpu_note.is_none();
+            if waiting {
+                s.gpu_note = Some(format!(
+                    "A GPU is available now. Blender moves to it once the scene has no unsaved \
+                     changes and no request has arrived for {} s.",
+                    retry.quiet.as_secs()
+                ));
+            }
+            waiting
+        });
+        Check::Waiting
     }
 
     /// Records what the exit lost, then brings Blender back and reopens the
     /// last `.blend` so saved work is where it was.
-    async fn exited(&self, generation: u64, exit: Option<ExitStatus>) {
+    async fn exited(&self, launch: u64, exit: Option<ExitStatus>) {
         let mut slot = self.conn.lock().await;
-        if self.generation.load(Ordering::SeqCst) != generation {
-            return;
-        }
-        if slot.as_ref().is_some_and(|c| c.generation != generation) {
+        if self.current.load(Ordering::SeqCst) != launch {
             return;
         }
         *slot = None;
+        if tokio::time::timeout(STOP_SETTLE, self.stopped())
+            .await
+            .is_ok()
+        {
+            info!("Blender stopped");
+            return;
+        }
         let before = self.status();
         let exit_code = exit.and_then(|s| s.code());
         let message = format!(
@@ -472,6 +672,7 @@ impl Blender {
                     conn = Some(c);
                     break;
                 }
+                Err(_) if self.is_stopping() => return,
                 Err(e) => {
                     warn!(attempt, "restart failed: {e}");
                     self.status.send_modify(|s| {
@@ -483,30 +684,55 @@ impl Blender {
             }
         }
         let Some(mut conn) = conn else { return };
-        if let Some(file) = before.file
-            && let Ok(path) = self.cfg.camp.existing(&file)
-        {
-            let op = Op::Open {
-                path: path.to_string_lossy().into_owned(),
-            };
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            match exchange(
-                &mut conn,
-                id,
-                &op,
-                Some(QUICK_TIMEOUT),
-                None,
-                &mut |_, _| {},
-            )
-            .await
-            {
-                Ok(reply) if reply.ok => {
-                    self.status.send_modify(|s| s.file = Some(file));
-                }
-                _ => warn!(file, "could not reopen the last .blend"),
+        if let Some(file) = before.file {
+            if self.reopen(&mut conn, &file).await {
+                self.status.send_modify(|s| s.file = Some(file));
+            } else {
+                warn!(file, "could not reopen the last .blend");
             }
         }
         *slot = Some(conn);
+    }
+}
+
+fn forward(stream: impl AsyncRead + Unpin + Send + 'static, tail: Tail) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            debug!(target: "blender", "{line}");
+            let mut tail = tail.lock().expect("log tail lock");
+            if tail.len() == LOG_TAIL {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
+    });
+}
+
+/// While Blender runs without a GPU, looks for one again: often at first,
+/// then rarely, so a machine without a GPU is left alone.
+async fn recover_gpu(
+    blender: Weak<Blender>,
+    mut status: watch::Receiver<Status>,
+    stopping: watch::Receiver<bool>,
+    retry: GpuRetry,
+) {
+    let mut delay = retry.first;
+    loop {
+        if status.wait_for(|s| s.devices.is_empty()).await.is_err() {
+            return;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = stopped(stopping.clone()) => return,
+        }
+        let Some(blender) = blender.upgrade() else {
+            return;
+        };
+        delay = match blender.check_gpu().await {
+            Check::Recovered | Check::Waiting => retry.first,
+            Check::Missing => retry.after(delay),
+        };
     }
 }
 

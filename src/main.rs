@@ -7,10 +7,14 @@ use blender_live::{
     basecamp::BaseCamp,
     blender::{Blender, Config},
     events,
+    gpu::GpuRetry,
 };
-use std::{error::Error, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{error::Error, future::IntoFuture, net::SocketAddr, path::PathBuf, time::Duration};
 use tokio::net::TcpListener;
 use tracing::info;
+
+/// How long requests in flight get to finish after a stop signal.
+const STOP_GRACE: Duration = Duration::from_secs(2);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -46,18 +50,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
         gpus,
         camp,
         grace: Duration::from_secs(30),
+        gpu_retry: GpuRetry::default(),
     })
     .await?;
     events::forward_status(blender.subscribe(), bus.clone());
-    let state = AppState::new(blender, bus);
+    let state = AppState::new(blender.clone(), bus);
 
     let bind_addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(bind_addr).await?;
     info!(%bind_addr, "server listening");
 
-    axum::serve(listener, blender_live::app(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let stopped = {
+        let blender = blender.clone();
+        async move { blender.stopped().await }
+    };
+    let server = axum::serve(listener, blender_live::app(state))
+        .with_graceful_shutdown(stopped)
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result?,
+        () = shutdown_signal() => {
+            blender.stop();
+            // Event streams of browsers and MCP clients never end on their own.
+            if tokio::time::timeout(STOP_GRACE, &mut server).await.is_err() {
+                info!("closing the connections that stayed open");
+            }
+        }
+    }
 
     info!("server stopped");
     Ok(())

@@ -57,8 +57,23 @@ def run(code):
     return eval(compile(ast.Expression(last), "<fake>", "eval"), ns) if last else None
 
 
+def gpu():
+    """The fake GPU, unless a `no-gpu` file in the base camp hides it.
+
+    Each hidden start adds its pid to that file, so tests can count launches.
+    """
+    try:
+        with open("no-gpu", "r+") as marker:
+            marker.seek(0, os.SEEK_END)
+            marker.write(f"{os.getpid()}\n")
+    except FileNotFoundError:
+        return ["Fake GPU"], "OPTIX"
+    return [], None
+
+
 print("fake blender starting", os.environ.get("CUDA_VISIBLE_DEVICES"), flush=True)
-send({"type": "ready", "version": "fake", "devices": ["Fake GPU"], "device_type": "OPTIX"})
+devices, device_type = gpu()
+send({"type": "ready", "version": "fake", "devices": devices, "device_type": device_type})
 while True:
     req = line()
     reply = {"type": "reply", "id": req["id"], "ok": True, "value": None}

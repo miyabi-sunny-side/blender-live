@@ -23,6 +23,7 @@ async fn app() -> (tempfile::TempDir, AppState, Router) {
         gpus: None,
         camp,
         grace: Duration::from_millis(500),
+        gpu_retry: blender_live::gpu::GpuRetry::default(),
     })
     .await
     .unwrap();

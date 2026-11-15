@@ -106,6 +106,13 @@ EGL picks and is not affected by this setting. Blender starts without `DISPLAY` 
 
 `status` and `scene_summary` show the devices Blender actually enabled.
 
+If no GPU is ready when Blender starts, as can happen right after boot, Cycles renders on the CPU
+and `status` lists no devices. blender-live then looks for a GPU again in the background, and when
+one is there it replaces Blender with a new process that uses it. It does so only when no request
+is running, the scene has no unsaved changes and no request has arrived for 10 minutes. The open
+`.blend` is opened again; Python variables start empty. While it waits for that moment, `status`
+says so in `gpu_note`. A machine without a GPU stays on the CPU.
+
 ## MMD models
 
 PMX models import with the MMD Tools extension. Install it once for the user that runs
@@ -130,6 +137,11 @@ built-in operators. Keep model data in `assets/`; many model licenses forbid red
 If Blender exits or a request outlives its timeout, blender-live kills it if needed, starts a new
 one and reopens the last saved `.blend`. The failed call returns an error, and the page and the
 `status` tool report the restart and whether the scene had unsaved changes that were lost.
+
+## Stopping
+
+On `SIGTERM` or `SIGINT` blender-live ends Blender, gives requests in flight 2 seconds to finish
+and exits, even while browsers or MCP clients are connected. A render in progress is lost.
 
 ## Development
 

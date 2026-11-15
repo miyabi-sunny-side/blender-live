@@ -5,6 +5,7 @@ pub mod blender;
 pub mod encode;
 pub mod events;
 pub mod files;
+pub mod gpu;
 pub mod http;
 pub mod job;
 pub mod mcp;
