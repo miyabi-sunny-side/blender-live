@@ -118,6 +118,18 @@ async fn lists_and_status_are_json() {
     let body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["blender"]["state"], "ready");
     assert_eq!(body["jobs"], Value::Array(vec![]));
+    assert_eq!(body["viewer"], Value::Null);
+}
+
+#[tokio::test]
+async fn the_status_names_an_outside_viewer() {
+    let (_dir, state, _) = app().await;
+    let app =
+        blender_live::app(state.with_viewer(Some("http://depot:5015/view/blender".to_owned())));
+
+    let (_, _, body) = send(&app, get("/api/status")).await;
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["viewer"], "http://depot:5015/view/blender");
 }
 
 #[tokio::test]

@@ -59,8 +59,23 @@ authentication, so run it only on a trusted network.
 | `LOG_LEVEL` | `off`, `error`, `warn`, `info`, `debug` or `trace` | `info` |
 | `BLENDER_BIN` | Blender executable | `blender` on `PATH` |
 | `BLENDER_GPUS` | GPUs Cycles may use: `nvidia-smi` indices such as `0` or `0,1`, or `all` | `0,1` |
+| `VIEWER_URL` | Address of an outside page that shows the files of `renders/`; see [Viewing renders elsewhere](#viewing-renders-elsewhere) | this server's own page |
 
 Blender's own messages appear in the log at `debug` level.
+
+## Viewing renders elsewhere
+
+When another server already lists `renders/` — a gallery that reads the directory in place, for
+example — set `VIEWER_URL` to the address under which it shows those files:
+
+```sh
+VIEWER_URL=http://<host>:5015/view/blender blender-live ~/blender-camp
+```
+
+`renders/turn.mp4` is then viewed at `http://<host>:5015/view/blender/turn.mp4`. The `view_url`
+of the MCP tools points there, and the web page lists renders as links to it instead of showing
+them. Job progress, the Blender state and the other base camp files stay on the page, and
+`file_url` still serves the file from this server.
 
 ## MCP tools
 

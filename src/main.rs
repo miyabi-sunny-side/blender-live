@@ -42,6 +42,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bin =
         std::env::var_os("BLENDER_BIN").map_or_else(|| PathBuf::from("blender"), PathBuf::from);
     let gpus = cli::gpus(std::env::var("BLENDER_GPUS").ok().as_deref())?;
+    let viewer = cli::viewer(std::env::var("VIEWER_URL").ok().as_deref())?;
     let port = port::from_env()?;
     info!(camp = %camp.root().display(), bin = %bin.display(), ?gpus, "starting Blender");
 
@@ -57,7 +58,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     })
     .await?;
     events::forward_status(blender.subscribe(), bus.clone());
-    let state = AppState::new(blender.clone(), bus);
+    let state = AppState::new(blender.clone(), bus).with_viewer(viewer);
 
     let bind_addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(bind_addr).await?;

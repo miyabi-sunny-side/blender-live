@@ -90,6 +90,16 @@ beforeEach(() => {
   vi.stubGlobal("EventSource", FakeEventSource);
 });
 
+/** Answers `/api/status` as a server whose renders are viewed elsewhere. */
+function serveViewer(viewer: string) {
+  const files_ = fetchMock.getMockImplementation();
+  fetchMock.mockImplementation((input, init) =>
+    String(input) === "/api/status"
+      ? Promise.resolve(new Response(JSON.stringify({ viewer })))
+      : (files_?.(input, init) ?? Promise.reject(new Error("no mock"))),
+  );
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -188,5 +198,30 @@ describe("Home", () => {
     const source = FakeEventSource.last;
     unmount();
     expect(source?.closed).toBe(true);
+  });
+
+  it("links renders to an outside viewer instead of showing them", async () => {
+    serveViewer("http://depot:5015/view/blender");
+    files.renders = [
+      { path: "renders/turn.mp4", kind: "video", size: 9, modified_ms: 2 },
+      image("renders/first.png", 1),
+    ];
+    render(Home);
+
+    const link = await screen.findByRole("link", { name: "turn.mp4" });
+    expect(link.getAttribute("href")).toBe(
+      "http://depot:5015/view/blender/turn.mp4",
+    );
+    expect(
+      screen.getByRole("link", { name: "first.png" }).getAttribute("href"),
+    ).toBe("http://depot:5015/view/blender/first.png");
+    expect(document.querySelector("video, .gallery")).toBeNull();
+
+    FakeEventSource.last?.emit("jobs", [{ ...JOB, phase: "done" }]);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("link", { name: "turntable" }).getAttribute("href"),
+      ).toBe("http://depot:5015/view/blender/turntable.mp4"),
+    );
   });
 });

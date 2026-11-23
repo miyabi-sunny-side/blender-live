@@ -8,6 +8,7 @@ import {
   phaseLabel,
   processLabel,
   progressPercent,
+  renderHref,
   viewHref,
 } from "./format";
 import type { Job } from "./api";
@@ -92,6 +93,18 @@ describe("urls", () => {
     );
     expect(viewHref("renders/a b.mp4")).toBe("/view/renders/a%20b.mp4");
     expect(basename("assets/moca/宮舞モカ.pmx")).toBe("宮舞モカ.pmx");
+  });
+});
+
+describe("renderHref", () => {
+  it("opens renders on this page unless an outside viewer is set", () => {
+    expect(renderHref("renders/a b.mp4", null)).toBe("/view/renders/a%20b.mp4");
+    expect(
+      renderHref("renders/clip/モカ.png", "http://depot:5015/view/b"),
+    ).toBe("http://depot:5015/view/b/clip/%E3%83%A2%E3%82%AB.png");
+    expect(renderHref("scenes/a.blend", "http://depot:5015/view/b")).toBe(
+      "/view/scenes/a.blend",
+    );
   });
 });
 

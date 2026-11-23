@@ -3,6 +3,7 @@
   import {
     cancelJob,
     fetchFiles,
+    fetchViewer,
     type Dir,
     type Entry,
     type Job,
@@ -16,6 +17,7 @@
     phaseLabel,
     processLabel,
     progressPercent,
+    renderHref,
     totalFrames,
     viewHref,
   } from "../lib/format";
@@ -31,6 +33,8 @@
   let tabFiles = $state<Entry[]>([]);
   let tabState = $state<ListState>("loading");
   let now = $state(Date.now());
+  // An outside page that shows renders; this page then only links to it.
+  let viewer = $state<string | null>(null);
 
   let visibleJobs = $derived(jobs.slice(0, 5));
 
@@ -69,6 +73,10 @@
 
   $effect(() => {
     reload();
+    void fetchViewer().then(
+      (url) => (viewer = url),
+      () => undefined,
+    );
     const source = new EventSource("/api/events");
     source.onopen = reload;
     source.onmessage = (message: MessageEvent<string>) => {
@@ -140,7 +148,9 @@
           <li class="job" data-phase={job.phase}>
             <div class="job-line">
               {#if job.phase === "done"}
-                <a class="name" href={viewHref(`renders/${job.name}.mp4`)}
+                <a
+                  class="name"
+                  href={renderHref(`renders/${job.name}.mp4`, viewer)}
                   >{job.name}</a
                 >
               {:else}
@@ -193,6 +203,21 @@
         <p class="state error">読み込みに失敗しました</p>
         <button class="btn" type="button" onclick={reload}>再試行</button>
       </div>
+    {:else if viewer}
+      <ul class="files">
+        {#each renders as entry (entry.path)}
+          <li>
+            <a class="path" href={renderHref(entry.cover ?? entry.path, viewer)}
+              >{basename(entry.path)}</a
+            >
+            <span class="muted meta">
+              {#if entry.frames}{entry.frames} frames{:else}{formatSize(
+                  entry.size,
+                )}{/if} · {formatTime(entry.modified_ms, now)}
+            </span>
+          </li>
+        {/each}
+      </ul>
     {:else}
       <ul class="gallery">
         {#each renders as entry (entry.path)}

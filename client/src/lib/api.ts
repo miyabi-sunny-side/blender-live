@@ -73,6 +73,16 @@ export function fetchFiles(dir: Dir, signal?: AbortSignal): Promise<Entry[]> {
   return requestJson(`/api/files/${dir}`, { signal });
 }
 
+/** The outside page that shows renders, when the server has one. */
+export async function fetchViewer(
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const status = await requestJson<{ viewer?: string | null }>("/api/status", {
+    signal,
+  });
+  return status.viewer ?? null;
+}
+
 export function cancelJob(id: string): Promise<Job> {
   return requestJson(`/api/jobs/${encodeURIComponent(id)}/cancel`, {
     method: "POST",

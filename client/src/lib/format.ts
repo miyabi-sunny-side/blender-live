@@ -92,6 +92,15 @@ export function viewHref(path: string): string {
   return `/view/${encodePath(path)}`;
 }
 
+/** Where a render is looked at: the outside viewer when one is set,
+ * which holds the files of `renders/` under its own address. */
+export function renderHref(path: string, viewer: string | null): string {
+  const prefix = "renders/";
+  return viewer !== null && path.startsWith(prefix)
+    ? `${viewer}/${encodePath(path.slice(prefix.length))}`
+    : viewHref(path);
+}
+
 export function basename(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }

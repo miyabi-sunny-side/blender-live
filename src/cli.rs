@@ -7,7 +7,9 @@ Environment:
   PORT          HTTP port (default 5014)
   LOG_LEVEL     off, error, warn, info, debug or trace (default info)
   BLENDER_BIN   Blender executable (default: blender on PATH)
-  BLENDER_GPUS  nvidia-smi indices Cycles may use, e.g. 0 or 0,1, or all (default 0,1)";
+  BLENDER_GPUS  nvidia-smi indices Cycles may use, e.g. 0 or 0,1, or all (default 0,1)
+  VIEWER_URL    outside page that shows renders, e.g. http://host:5015/view/blender
+                (default: this server's own page)";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Cli {
@@ -23,6 +25,25 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         [camp] if !camp.starts_with('-') => Ok(Cli::Serve(PathBuf::from(camp))),
         [] => Err("missing BASE_CAMP".into()),
         _ => Err(format!("unexpected arguments: {}", args.join(" "))),
+    }
+}
+
+/// The address of an outside page that shows renders, without its trailing
+/// slash; `None` keeps this server's own page.
+pub fn viewer(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let address = value.trim_end_matches('/');
+    let host = address
+        .strip_prefix("http://")
+        .or_else(|| address.strip_prefix("https://"));
+    if host.is_some_and(|host| !host.is_empty()) {
+        Ok(Some(address.to_owned()))
+    } else {
+        Err(format!(
+            "VIEWER_URL must be an http or https address like http://host:5015/view/blender; got {value:?}"
+        ))
     }
 }
 
@@ -75,6 +96,23 @@ mod tests {
     fn a_missing_or_extra_argument_is_an_error() {
         for list in [&[][..], &["a", "b"], &["--port", "1"]] {
             assert!(parse(&args(list)).is_err(), "{list:?}");
+        }
+    }
+
+    #[test]
+    fn the_viewer_is_this_server_unless_an_http_address_is_given() {
+        assert_eq!(viewer(None), Ok(None));
+        assert_eq!(viewer(Some("  ")), Ok(None));
+        assert_eq!(
+            viewer(Some(" http://agent-hub:5015/view/blender/ ")),
+            Ok(Some("http://agent-hub:5015/view/blender".into()))
+        );
+        assert_eq!(
+            viewer(Some("https://depot.example/view/b")),
+            Ok(Some("https://depot.example/view/b".into()))
+        );
+        for bad in ["agent-hub:5015", "/view/blender", "ftp://host/x", "http://"] {
+            assert!(viewer(Some(bad)).is_err(), "accepted {bad:?}");
         }
     }
 

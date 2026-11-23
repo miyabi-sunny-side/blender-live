@@ -246,7 +246,8 @@ impl Tools {
         };
         match render::still(&self.state, a.name.as_deref(), shot).await {
             Ok(still) => {
-                let (file_url, view_url) = urls(host(&parts), &still.path);
+                let (file_url, view_url) =
+                    urls(host(&parts), self.state.viewer.as_deref(), &still.path);
                 let text = json!({
                     "path": still.path,
                     "file_url": file_url,
@@ -291,7 +292,11 @@ impl Tools {
         };
         match render::animation(&self.state, anim).await {
             Ok(job) => {
-                let (file_url, view_url) = urls(host(&parts), &format!("renders/{}.mp4", job.name));
+                let (file_url, view_url) = urls(
+                    host(&parts),
+                    self.state.viewer.as_deref(),
+                    &format!("renders/{}.mp4", job.name),
+                );
                 ok(&json!({"job": job, "file_url": file_url, "view_url": view_url}))
             }
             Err(e) => fail(e),

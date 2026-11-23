@@ -51,15 +51,19 @@ pub fn output_name(
 }
 
 /// Absolute file and viewer URLs when the request named a host, otherwise
-/// root-relative ones.
+/// root-relative ones. With an outside `viewer`, a render is viewed there:
+/// its path below `renders/` is appended to the viewer's address.
 #[must_use]
-pub fn urls(host: Option<&str>, rel: &str) -> (String, String) {
+pub fn urls(host: Option<&str>, viewer: Option<&str>, rel: &str) -> (String, String) {
     let origin = host.map(|h| format!("http://{h}")).unwrap_or_default();
     let path = encode_path(rel);
-    (
-        format!("{origin}/files/{path}"),
-        format!("{origin}/view/{path}"),
-    )
+    let view = match (viewer, rel.strip_prefix("renders/")) {
+        (Some(viewer), Some(render)) => {
+            format!("{}/{}", viewer.trim_end_matches('/'), encode_path(render))
+        }
+        _ => format!("{origin}/view/{path}"),
+    };
+    (format!("{origin}/files/{path}"), view)
 }
 
 /// Percent-encodes everything but unreserved characters, keeping `/`.
@@ -129,16 +133,44 @@ mod tests {
     }
 
     #[test]
+    fn an_outside_viewer_shows_renders_under_its_own_address() {
+        let viewer = Some("http://agent-hub:5015/view/blender/");
+        assert_eq!(
+            urls(Some("agent-hub:5014"), viewer, "renders/モカ 正面.png"),
+            (
+                "http://agent-hub:5014/files/renders/%E3%83%A2%E3%82%AB%20%E6%AD%A3%E9%9D%A2.png"
+                    .into(),
+                "http://agent-hub:5015/view/blender/%E3%83%A2%E3%82%AB%20%E6%AD%A3%E9%9D%A2.png"
+                    .into()
+            )
+        );
+        assert_eq!(
+            urls(
+                None,
+                Some("http://depot/view/blender"),
+                "renders/clip/a.mp4"
+            )
+            .1,
+            "http://depot/view/blender/clip/a.mp4"
+        );
+        // Only renders live in the viewer's directory.
+        assert_eq!(
+            urls(None, viewer, "scenes/cube.blend").1,
+            "/view/scenes/cube.blend"
+        );
+    }
+
+    #[test]
     fn urls_encode_each_segment() {
         assert_eq!(
-            urls(Some("192.168.1.101:5014"), "renders/モカ 正面.png"),
+            urls(Some("192.168.1.101:5014"), None, "renders/モカ 正面.png"),
             (
                 "http://192.168.1.101:5014/files/renders/%E3%83%A2%E3%82%AB%20%E6%AD%A3%E9%9D%A2.png".into(),
                 "http://192.168.1.101:5014/view/renders/%E3%83%A2%E3%82%AB%20%E6%AD%A3%E9%9D%A2.png".into()
             )
         );
         assert_eq!(
-            urls(None, "renders/a#1?.png"),
+            urls(None, None, "renders/a#1?.png"),
             (
                 "/files/renders/a%231%3F.png".into(),
                 "/view/renders/a%231%3F.png".into()

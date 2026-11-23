@@ -56,6 +56,7 @@ async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "blender": state.blender.status(),
         "jobs": state.jobs.lock().expect("jobs lock").list(),
+        "viewer": state.viewer,
     }))
 }
 
